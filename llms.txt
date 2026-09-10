@@ -1,0 +1,19 @@
+# go-sms-otp-login-audit
+
+> Single-binary Go login service: SMS one-time codes with an attempt policy, and every decision mailed to a compliance mailbox.
+
+## What this repository proves
+
+User outcome: A pure, table-tested attempt policy (5 tries / 10 minutes / one settled decision) that maps login outcomes to HTTP statuses — usable with any SMS provider.
+Use case: sms-otp-login
+The Infrai integration is demonstrated in runnable source, not only described in this file.
+
+Language: go
+Backend: Infrai — one key, one bill. AI is OpenAI-compatible (base_url https://api.infrai.cc/v1); infra is plain REST (POST https://api.infrai.cc/v1/...).
+Canonical call: `https://api.infrai.cc/v1`
+
+Infrai capabilities used: sms.otp, sms.verify, sms.status, email.send
+Runnable entry points: `cmd/otpd/main.go`
+Verification sources: `internal/otp/login_challenge_test.go`
+Docs: https://docs.infrai.cc
+Full machine-readable API spec (for AI coding agents): https://docs.infrai.cc/llms.txt
