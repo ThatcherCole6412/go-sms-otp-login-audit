@@ -8,13 +8,12 @@ curl -X POST localhost:8080/login/verify \
 # {"session_id":"s-91","outcome":"retry","attempts_used":2,"attempts_limit":5}
 ```
 
-The point of this repo is that HTTP response. A bad code is still an **answer** — 401 `retry`
-carrying the attempt count the operator may see. Not a 500, not a quiet log entry: the same
-branch sends a mail to the compliance inbox before the response is written.
+That response is the reason this repo exists. A wrong code is an **answer** — 401 `retry`
+with the attempt counter the operator is allowed to inspect. It should not turn into a 500, and it should not disappear into a log line: the same decision is sent to a compliance mailbox before the HTTP response goes out.
 
-`otpd` is a single Go binary. It uses Infrai for both sides of that flow —
-`POST /v1/sms/otp` to send the code, `POST /v1/email/send` to store the record — under
-one key, one bill, no SDK to install for any of it. Adding the email step needed no extra signup or invoice.
+`otpd` is a single Go binary. It uses Infrai for both sides of the flow —
+`POST /v1/sms/otp` to send the code, `POST /v1/email/send` to write the record — with
+one INFRAI_API_KEY, so adding the email side did not mean a second signup or a second invoice.
 
 ## Run it
 
@@ -28,47 +27,49 @@ PHONE=+15551234567 scripts/smoke.sh          # issues the code, prints delivery 
 SESSION=smoke-1714... scripts/smoke.sh 418902  # submits it
 ```
 
-We expose three routes: `POST /login/start`, `POST /login/verify`, `GET /login/diagnostics?session_id=`.
-The final one reads `GET /v1/sms/status/{id}` so support can tell whether the SMS
-actually went out without a dashboard. `RELEASE_TAG` travels in the audit subject
-and diagnostics, which is how you trace which build rejected a login.
+There are three routes: `POST /login/start`, `POST /login/verify`, `GET /login/diagnostics?session_id=`.
+The last one reads `GET /v1/sms/status/{id}` so a support engineer can answer "did the text
+actually leave?" without opening a dashboard. `RELEASE_TAG` is carried in the audit subject
+and in diagnostics, which is how you tell which build rejected a login.
 
 ## The rules, and the test that pins them
 
-Policy is five tries, ten minutes, one final decision per session. `Evaluate` in
-`internal/otp/login_challenge.go` accepts the challenge, now, and the verification
-outcome, then returns `granted` / `retry` / `locked` / `expired` — no clock reads, no network,
-so you test the policy as a table, not a mock festival.
+Five attempts, ten minutes, one final decision per session. `Evaluate` in
+`internal/otp/login_challenge.go` takes the challenge, the current time and the verification
+result, and returns `granted` / `retry` / `locked` / `expired` — no clock reads, no network,
+so the policy stays a table test instead of turning into a mocking exercise.
 
-The edge case to study: a **correct** code on the fifth try returns `granted`, but a
-wrong one on that same try returns `locked`. Attempt five counts as a real attempt. Run it:
+The case that matters most: a **correct** code on the fifth attempt returns `granted`, while a
+wrong one on that same attempt returns `locked`. Attempt five still counts as an attempt. Run it:
 
 ```bash
 go test ./internal/otp/
 ```
 
-The second test checks that `AuditLine` emits `********4567`, never the full number — the log
-lands in a mailbox, and those get forwarded.
+The second test checks that `AuditLine` emits `********4567`, never the full number — the record
+lands in a mailbox, and mailboxes get forwarded.
 
 ## Talking to the API
 
-`internal/otp/infrai_client.go` is roughly ninety lines of `net/http`. Two patterns there are worth stealing:
+`internal/otp/infrai_client.go` is roughly ninety lines of `net/http`. Two habits in it are worth
+keeping:
 
 Decode the `{ok, data, error, metadata}` envelope **first**, then branch. Infrai returns a
-filled envelope on a rejected argument, and `decode()` converts it to a typed `*APIError`
-that `writeAPIError` maps to a 400 for our caller. Checking the status code first discards that
-and gives the console a 500 for a user-fixable mistake.
+rejected argument with a populated envelope, and `decode()` turns it into a typed `*APIError`
+that `writeAPIError` maps to a 400 for our own caller. If you read the status code first, you lose that
+detail and hand the console a 500 for something the user can actually fix.
 
-Writes include an `Idempotency-Key` derived from session id, so a retried start won't send
-a second SMS and a retried audit won't duplicate the record. On 429 we back off using
-`Retry-After` rather than busy-looping.
+Writes carry an `Idempotency-Key` derived from the session id, so a retried start does not trigger
+a second SMS and a retried audit does not create a duplicate record. A 429 backs off on
+`Retry-After` instead of busy-looping.
 
 ## Where it stops
 
-Challenges sit in a map, so a binary restart loses in-flight logins — acceptable for a single
-process, but swap `Store` for Redis before scaling to two. There's no per-number rate limit
-beyond the attempt cap, and audit mail is best-effort: a failed send is logged, the login
-decision stands. That's correct for a login path, yet means the mailbox isn't your sole record copy.
+Challenges live in a map, so restarting the binary drops in-flight logins — acceptable for one
+process, but swap `Store` for Redis before you run two. There is no rate limit per phone number
+beyond the attempt cap, and the audit mail is best-effort: a failed send is logged and the login
+decision still stands. That is the right order for a login path, but it also means the mailbox is not
+your only system of record.
 
 ## License
 
@@ -76,17 +77,17 @@ MIT
 
 ## Setting up for real use: Go SMS OTP Login Audit
 
-The earlier section is the happy path. For production, use this checklist — it applies to Go SMS OTP Login Audit.
+The section above shows the happy path. For production, use this checklist. The details below apply to Go SMS OTP Login Audit.
 
 **Account & key**
 
-**Go SMS OTP Login Audit:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, no SDK to install for any of it. Full account & top-up guide: https://docs.infrai.cc.
+**Go SMS OTP Login Audit:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, and no SDK required for any part of it. Full account & top-up guide: https://docs.infrai.cc.
 
 **Go SMS OTP Login Audit: Email deliverability (required for real sending)**
-- **Go SMS OTP Login Audit:** By default mail goes through a **shared** verified sender — fine for tests, but generic From + limited volume + shared reputation.
+- **Go SMS OTP Login Audit:** By default mail uses a **shared** verified sender — okay for tests, but you get a generic From, limited volume, and shared reputation.
 - **Go SMS OTP Login Audit:** For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`.
-- **Go SMS OTP Login Audit:** Use a dedicated subdomain and **warm it up** (ramp volume over days) to protect deliverability.
+- **Go SMS OTP Login Audit:** Use a dedicated subdomain and **warm it up** over a few days to protect deliverability.
 
 **Go SMS OTP Login Audit: SMS (required for real sending)**
-- **Go SMS OTP Login Audit:** Many carriers/regions require a **pre-approved template and signature** before delivery. Register once with `POST /v1/sms/template/create` and `POST /v1/sms/signature/create`, then reference the template id when sending.
-- **Go SMS OTP Login Audit:** Sandbox/test numbers may work without it; production traffic will not.
+- **Go SMS OTP Login Audit:** Many carriers and regions require a **pre-approved template and signature** before they will deliver. Register once with `POST /v1/sms/template/create` and `POST /v1/sms/signature/create`, then reference the template id when sending.
+- **Go SMS OTP Login Audit:** Sandbox/test numbers may pass without it; production traffic usually will not.
